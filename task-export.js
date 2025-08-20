@@ -1,30 +1,54 @@
 /**
- * Taskabana → Export Google Tasks to a Sheet tab "TaskSync"
- * Setup (one time):
+ * Taskabana → Export a SPECIFIC Google Tasks list to a Sheet tab "TaskSync"
  * 1) In Apps Script editor: Services (puzzle icon) → Enable "Tasks API".
- * 2) It will prompt you to enable Tasks API in the cloud project as well.
- * 3) Adjust LIST_NAME below (or leave null to pick the user's default list).
+ * 2) Also enable the Tasks API in the linked Google Cloud project when prompted.
+ * 3) Run menu: Taskabana → Log Task List IDs, copy the ID you want, and set LIST_ID.
  */
 
-const LIST_NAME = null; // e.g. "My Tasks". If null, uses the first (primary) list.
+const LIST_ID = 'PUT_YOUR_TASK_LIST_ID_HERE'; // <-- replace after running "Log Task List IDs"
 const SHEET_NAME = 'TaskSync';
 
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Taskabana')
     .addItem('Export Tasks to "TaskSync"', 'exportTasksToTaskSync')
+    .addSeparator()
+    .addItem('Log Task List IDs', 'logTaskListIds')
     .addToUi();
 }
 
+/** Lists all your Task Lists (title + id) in the Logs so you can set LIST_ID. */
+function logTaskListIds() {
+  let pageToken;
+  let count = 0;
+  do {
+    const resp = Tasks.Tasklists.list({ maxResults: 100, pageToken });
+    (resp.items || []).forEach(l => {
+      console.log(`List: "${l.title}"   ID: ${l.id}`);
+      count++;
+    });
+    pageToken = resp.nextPageToken;
+  } while (pageToken);
+  SpreadsheetApp.getUi().alert(`Logged ${count} list(s) to View → Logs.\nCopy the ID and set LIST_ID in the script.`);
+}
+
 function exportTasksToTaskSync() {
-  const list = resolveTaskList_(LIST_NAME);
-  if (!list) {
-    SpreadsheetApp.getUi().alert('Could not find a Google Tasks list. Check LIST_NAME or your Tasks account.');
+  // Validate LIST_ID
+  try {
+    const test = Tasks.Tasklists.get(LIST_ID);
+    if (!test) {
+      SpreadsheetApp.getUi().alert('LIST_ID was not found. Use "Log Task List IDs" and set LIST_ID.');
+      return;
+    }
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('Could not fetch that LIST_ID. Use "Log Task List IDs" and set LIST_ID.');
+    console.error(e);
     return;
   }
 
-  const tasks = fetchAllTasks_(list.id);
-  const ordered = orderTasksHierarchically_(tasks);
+  // Fetch all tasks (including completed + hidden), with pagination
+  const tasks = fetchAllTasks_(LIST_ID);
+  console.log(`Fetched ${tasks.length} tasks from list ${LIST_ID}`);
 
   const sheet = getOrCreateSheet_(SHEET_NAME);
   sheet.clear();
@@ -41,20 +65,27 @@ function exportTasksToTaskSync() {
     'Parent ID',
     'Position',
     'Updated',
-    'List'
+    'List ID'
   ];
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
 
-  // Build rows (plain values first for speed)
+  if (tasks.length === 0) {
+    sheet.getRange(2, 1).setValue('No tasks found in this list.');
+    sheet.setFrozenRows(1);
+    return;
+  }
+
+  // Flattened hierarchical order (roots → children by position)
+  const ordered = orderTasksHierarchically_(tasks);
+
   const rows = [];
   const titleRich = [];
   const notesRich = [];
-  const tagsRegex = /\B#[\p{L}\p{N}_-]+/ug; // simple #tag detector
 
   ordered.forEach(item => {
     const t = item.task;
     const level = item.level;
-    const tags = extractTags_(t.notes || '');
+
     rows.push([
       level,
       stripMarkdown_(t.title || ''),
@@ -62,23 +93,18 @@ function exportTasksToTaskSync() {
       t.status || 'needsAction',
       t.due ? new Date(t.due) : '',
       t.completed ? new Date(t.completed) : '',
-      tags.join(', '),
+      extractTags_(t.notes || '').join(', '),
       t.id || '',
       t.parent || '',
       t.position || '',
       t.updated ? new Date(t.updated) : '',
-      list.title || ''
+      LIST_ID
     ]);
+
     titleRich.push(buildRichTextFromMarkdown_(t.title || ''));
     notesRich.push(buildRichTextFromMarkdown_(t.notes || ''));
   });
 
-  if (rows.length === 0) {
-    sheet.getRange(2, 1).setValue('No tasks found.');
-    return;
-  }
-
-  // Write data
   const range = sheet.getRange(2, 1, rows.length, headers.length);
   range.setValues(rows);
 
@@ -91,45 +117,29 @@ function exportTasksToTaskSync() {
   sheet.getRange(rowStart, completedCol, rows.length, 1).setNumberFormat('yyyy-mm-dd hh:mm');
   sheet.getRange(rowStart, updatedCol, rows.length, 1).setNumberFormat('yyyy-mm-dd hh:mm');
 
-  // Apply rich text for Title and Notes columns
+  // Rich text for Title & Notes
   const titleCol = headers.indexOf('Title') + 1;
   const notesCol = headers.indexOf('Notes') + 1;
   applyRichTextColumn_(sheet, rowStart, titleCol, titleRich);
   applyRichTextColumn_(sheet, rowStart, notesCol, notesRich);
 
-  // Autofit
+  // Nice layout
   sheet.autoResizeColumns(1, headers.length);
   sheet.setFrozenRows(1);
-  // Make Notes a bit wider
   sheet.setColumnWidth(notesCol, 420);
   sheet.setColumnWidth(titleCol, 280);
+
+  SpreadsheetApp.getUi().alert(`Exported ${rows.length} row(s) to "${SHEET_NAME}".`);
 }
 
-/** ---------- Helpers ---------- **/
-
-function resolveTaskList_(nameOrNull) {
-  let pageToken;
-  do {
-    const resp = Tasks.Tasklists.list({ maxResults: 100, pageToken });
-    const items = resp.items || [];
-    if (nameOrNull) {
-      const found = items.find(x => (x.title || '').trim() === nameOrNull);
-      if (found) return found;
-    } else {
-      // default to the first list
-      if (items.length > 0) return items[0];
-    }
-    pageToken = resp.nextPageToken;
-  } while (pageToken);
-  return null;
-}
+/** ----------- Helpers ----------- **/
 
 function fetchAllTasks_(taskListId) {
   const out = [];
   let pageToken;
   do {
     const resp = Tasks.Tasks.list(taskListId, {
-      showDeleted: false,
+      showCompleted: true,
       showHidden: true,
       maxResults: 100,
       pageToken
@@ -140,11 +150,7 @@ function fetchAllTasks_(taskListId) {
   return out;
 }
 
-/**
- * Order tasks in a flattened, hierarchical sequence:
- * - roots first (no parent), lexicographically by position
- * - then DFS their children (also by position)
- */
+/** Flatten in hierarchical order using position, with level info for indentation. */
 function orderTasksHierarchically_(tasks) {
   const byId = new Map();
   const children = new Map();
@@ -159,7 +165,8 @@ function orderTasksHierarchically_(tasks) {
   // sort children by position
   children.forEach(arr => arr.sort((a, b) => (a.position || '').localeCompare(b.position || '')));
 
-  const roots = tasks.filter(t => !t.parent)
+  const roots = tasks
+    .filter(t => !t.parent)
     .sort((a, b) => (a.position || '').localeCompare(b.position || ''));
 
   const result = [];
@@ -179,116 +186,62 @@ function getOrCreateSheet_(name) {
   return sh;
 }
 
-/**
- * Apply RichTextValue per-row to a given column.
- * richArray: array of RichTextValue objects matching number of rows.
- */
+/** Apply RichTextValue per-row to a given column. */
 function applyRichTextColumn_(sheet, rowStart, col, richArray) {
   for (let i = 0; i < richArray.length; i++) {
     const rtv = richArray[i];
-    if (rtv) {
-      sheet.getRange(rowStart + i, col).setRichTextValue(rtv);
-    }
+    if (rtv) sheet.getRange(rowStart + i, col).setRichTextValue(rtv);
   }
 }
 
-/**
- * Basic Markdown → Sheets Rich Text:
- * Supports:
- * - **bold** and *italic*
- * - `code` (monospace + light bg)
- * - [label](url) (hyperlinks)
- * - Headings (#, ##, ###) → bold entire line
- * - Bullet lines (- item or * item) → prefix with •
- * Other MD is left as plain text (safely).
- */
+/** Simple Markdown → Sheets rich text (bold/italic/code/links + bullets). */
 function buildRichTextFromMarkdown_(md) {
   md = md || '';
-  // Normalize line endings
   md = md.replace(/\r\n?/g, '\n');
 
-  // Convert headings to bold lines
-  md = md.replace(/^(#{1,6})\s*(.+)$/gm, (_, hashes, text) => {
-    return '**' + text.trim() + '**';
-  });
+  // Headings → bold
+  md = md.replace(/^(#{1,6})\s*(.+)$/gm, (_, __, text) => `**${text.trim()}**`);
 
-  // Convert bullet lines to bullets
+  // Bullet lines -> •
   md = md.replace(/^\s*[-*]\s+/gm, '• ');
 
-  // Handle links first: [label](url)
+  // Links: [label](url) → hyperlink
   const linkRuns = [];
   let text = md.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (m, label, url) => {
-    // we place the label in text and record a link run
     linkRuns.push({ label, url });
-    return '\u0000' + label + '\u0001'; // markers for later mapping
+    return '\u0000' + label + '\u0001';
   });
 
-  // Now process bold and italic and code into markers we can style by indices.
-  // Use simple non-greedy runs; nested combos are not fully supported.
-  const boldRanges = [];
-  text = text.replace(/\*\*(.+?)\*\*/g, (m, inner) => {
-    boldRanges.push(inner);
-    return '\u0002' + inner + '\u0003';
-  });
-
-  const italicRanges = [];
-  text = text.replace(/\*(.+?)\*/g, (m, inner) => {
-    italicRanges.push(inner);
-    return '\u0004' + inner + '\u0005';
-  });
-
-  const codeRanges = [];
-  text = text.replace(/`([^`]+)`/g, (m, inner) => {
-    codeRanges.push(inner);
-    return '\u0006' + inner + '\u0007';
-  });
-
-  // Build final plain string while recording absolute index ranges
-  let final = '';
-  const runs = []; // {start,end,type,extra}
-  function consumeMarkerSegments(src, openMarker, closeMarker, type) {
-    let idx = 0;
-    for (;;) {
-      const open = src.indexOf(openMarker, idx);
-      if (open === -1) {
-        final += src.slice(idx);
-        break;
-      }
-      final += src.slice(idx, open);
-      const afterOpen = open + openMarker.length;
-      const close = src.indexOf(closeMarker, afterOpen);
-      if (close === -1) {
-        // no close; treat marker as text
-        final += src.slice(open, afterOpen);
-        idx = afterOpen;
-        continue;
-      }
-      const inner = src.slice(afterOpen, close);
-      const start = final.length;
-      final += inner;
-      const end = final.length;
+  // Bold / italic / code placeholders
+  const runs = [];
+  function expandStyle(src, open, close, type) {
+    let out = '';
+    for (let i = 0; i < src.length; ) {
+      const o = src.indexOf(open, i);
+      if (o === -1) { out += src.slice(i); break; }
+      out += src.slice(i, o);
+      const c = src.indexOf(close, o + open.length);
+      if (c === -1) { out += src.slice(o, o + open.length); i = o + open.length; continue; }
+      const inner = src.slice(o + open.length, c);
+      const start = out.length;
+      out += inner;
+      const end = out.length;
       runs.push({ start, end, type });
-      idx = close + closeMarker.length;
+      i = c + close.length;
     }
+    return out;
   }
 
-  // First apply link placeholders, then bold/italic/code placeholders
-  // Step 1: Expand link markers, recording link runs
-  // Replace each \u0000label\u0001 sequentially
-  let linkIdx = 0;
+  // Expand link markers first (record absolute ranges)
+  let final = '';
   let tmp = '';
+  let linkIdx = 0;
   for (let i = 0; i < text.length; ) {
-    const c = text[i];
-    if (c === '\u0000') {
-      // find closing marker
+    if (text[i] === '\u0000') {
       const close = text.indexOf('\u0001', i + 1);
-      if (close === -1) {
-        tmp += c;
-        i++;
-        continue;
-      }
+      if (close === -1) { tmp += text[i++]; continue; }
       const label = text.slice(i + 1, close);
-      const start = (tmp + '').length;
+      const start = tmp.length;
       tmp += label;
       const end = tmp.length;
       const url = linkRuns[linkIdx] && linkRuns[linkIdx].url;
@@ -296,66 +249,36 @@ function buildRichTextFromMarkdown_(md) {
       linkIdx++;
       i = close + 1;
     } else {
-      tmp += c;
-      i++;
+      tmp += text[i++];
     }
   }
   text = tmp;
 
-  // Step 2: bold, italic, code markers to ranges
-  function expandStyle(src, open, close, type) {
-    let out = '';
-    for (let i = 0; i < src.length; ) {
-      const o = src.indexOf(open, i);
-      if (o === -1) {
-        out += src.slice(i);
-        break;
-      }
-      out += src.slice(i, o);
-      const c = src.indexOf(close, o + open.length);
-      if (c === -1) {
-        out += src.slice(o, o + open.length);
-        i = o + open.length;
-        continue;
-      }
-      const inner = src.slice(o + open.length, c);
-      const start = (final + out).length;
-      out += inner;
-      const end = (final + out).length;
-      runs.push({ start, end, type });
-      i = c + close.length;
-    }
-    return out;
-  }
-
-  text = expandStyle(text, '\u0002', '\u0003', 'bold');
-  text = expandStyle(text, '\u0004', '\u0005', 'italic');
-  text = expandStyle(text, '\u0006', '\u0007', 'code');
+  text = expandStyle(text, '**', '**', 'bold');
+  text = expandStyle(text, '*', '*', 'italic');
+  text = expandStyle(text, '`', '`', 'code');
 
   final += text;
 
-  // Build RichTextValue with all styles
+  // Build RichText
   const rtv = SpreadsheetApp.newRichTextValue().setText(final);
-  // Merge overlapping runs naïvely; Sheets can handle multiple setTextStyle calls.
   runs.forEach(run => {
-    const style = SpreadsheetApp.newTextStyle()
-      .setBold(run.type === 'bold' || undefined)
-      .setItalic(run.type === 'italic' || undefined)
-      .setFontFamily(run.type === 'code' ? 'Courier New' : undefined)
-      .setForegroundColor(run.type === 'code' ? '#503' : undefined)
-      .build();
-
     if (run.type === 'link') {
       rtv.setLinkUrl(run.start, run.end, run.url);
     } else {
+      const style = SpreadsheetApp.newTextStyle()
+        .setBold(run.type === 'bold' || undefined)
+        .setItalic(run.type === 'italic' || undefined)
+        .setFontFamily(run.type === 'code' ? 'Courier New' : undefined)
+        .setForegroundColor(run.type === 'code' ? '#503' : undefined)
+        .build();
       rtv.setTextStyle(run.start, run.end, style);
     }
   });
-
   return rtv.build();
 }
 
-/** Strip MD to plain text for non-rich columns */
+/** Plain-text strip of minimal MD for non-rich columns. */
 function stripMarkdown_(s) {
   if (!s) return '';
   s = s.replace(/\r\n?/g, '\n');
@@ -368,15 +291,12 @@ function stripMarkdown_(s) {
   return s;
 }
 
-/** Extract inline #tags (e.g., #icebucket) */
+/** Extract #tags */
 function extractTags_(notes) {
   if (!notes) return [];
   const tags = [];
   const re = /\B#([\p{L}\p{N}_-]+)/ug;
   let m;
-  while ((m = re.exec(notes)) !== null) {
-    tags.push(m[1]);
-  }
-  // de-dupe
+  while ((m = re.exec(notes)) !== null) tags.push(m[1]);
   return Array.from(new Set(tags));
 }
