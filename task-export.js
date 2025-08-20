@@ -360,9 +360,7 @@ function stripMarkdown_(s) {
   if (!s) return '';
   s = s.replace(/\r\n?/g, '\n');
   s = s.replace(/^(#{1,6})\s*(.+)$/gm, '$2'); // headings
-  s = s.replace(/$begin:math:display$([^$end:math:display$]+)\]$begin:math:text$(https?:\\/\\/[^\\s)]+)$end:math:text$/g, '$1 ($2)'); // links
-  s = s.replace(/\*\*(.+?)\*\*/g, '$1'); // bold
-  s = s.replace(/\*(.+?)\*/g, '$1');    // italic
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1 ($2)'); // links  s = s.replace(/\*(.+?)\*/g, '$1');    // italic
   s = s.replace(/`([^`]+)`/g, '$1');    // code
   s = s.replace(/^\s*[-*]\s+/gm, '• '); // bullets
   return s;
