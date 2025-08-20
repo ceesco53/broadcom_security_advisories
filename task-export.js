@@ -19,17 +19,35 @@ function onOpen() {
 
 /** Lists all your Task Lists (title + id) in the Logs so you can set LIST_ID. */
 function logTaskListIds() {
-  let pageToken;
-  let count = 0;
-  do {
-    const resp = Tasks.Tasklists.list({ maxResults: 100, pageToken });
-    (resp.items || []).forEach(l => {
-      console.log(`List: "${l.title}"   ID: ${l.id}`);
-      count++;
-    });
-    pageToken = resp.nextPageToken;
-  } while (pageToken);
-  SpreadsheetApp.getUi().alert(`Logged ${count} list(s) to View → Logs.\nCopy the ID and set LIST_ID in the script.`);
+  // Single request — no pagination
+  const resp = Tasks.Tasklists.list({
+    maxResults: 100,
+    fields: 'items(id,title)'
+  });
+  const items = (resp && resp.items) || [];
+
+  // Log to execution log
+  if (!items.length) {
+    Logger.log('No task lists found for this account.');
+  } else {
+    items.forEach(l => Logger.log(`List: "${l.title}"\tID: ${l.id}`));
+  }
+
+  // Also write to a sheet for convenience
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName('TaskLists') || ss.insertSheet('TaskLists');
+  sh.clear();
+  sh.getRange(1, 1, 1, 2).setValues([['Title', 'ID']]).setFontWeight('bold');
+
+  if (items.length) {
+    const rows = items.map(l => [l.title || '', l.id || '']);
+    sh.getRange(2, 1, rows.length, 2).setValues(rows);
+    sh.autoResizeColumns(1, 2);
+    ss.toast(`Listed ${rows.length} task list(s) in the "TaskLists" tab.`, 'Taskabana', 5);
+  } else {
+    sh.getRange(2, 1).setValue('No task lists found.');
+    ss.toast('No task lists found.', 'Taskabana', 5);
+  }
 }
 
 function exportTasksToTaskSync() {
@@ -199,21 +217,22 @@ function buildRichTextFromMarkdown_(md) {
   md = md || '';
   md = md.replace(/\r\n?/g, '\n');
 
-  // Headings → bold
+  // Headings → bold (rendered as **text**)
   md = md.replace(/^(#{1,6})\s*(.+)$/gm, (_, __, text) => `**${text.trim()}**`);
 
   // Bullet lines -> •
   md = md.replace(/^\s*[-*]\s+/gm, '• ');
 
-  // Links: [label](url) → hyperlink
+  // Links: [label](url) → hyperlink markers
   const linkRuns = [];
   let text = md.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (m, label, url) => {
     linkRuns.push({ label, url });
-    return '\u0000' + label + '\u0001';
+    return '\u0000' + label + '\u0001'; // sentinel
   });
 
-  // Bold / italic / code placeholders
+  // Collect style runs for bold/italic/code
   const runs = [];
+
   function expandStyle(src, open, close, type) {
     let out = '';
     for (let i = 0; i < src.length; ) {
@@ -233,7 +252,6 @@ function buildRichTextFromMarkdown_(md) {
   }
 
   // Expand link markers first (record absolute ranges)
-  let final = '';
   let tmp = '';
   let linkIdx = 0;
   for (let i = 0; i < text.length; ) {
@@ -254,11 +272,12 @@ function buildRichTextFromMarkdown_(md) {
   }
   text = tmp;
 
+  // Bold / italic / code
   text = expandStyle(text, '**', '**', 'bold');
   text = expandStyle(text, '*', '*', 'italic');
   text = expandStyle(text, '`', '`', 'code');
 
-  final += text;
+  const final = text;
 
   // Build RichText
   const rtv = SpreadsheetApp.newRichTextValue().setText(final);
@@ -266,15 +285,17 @@ function buildRichTextFromMarkdown_(md) {
     if (run.type === 'link') {
       rtv.setLinkUrl(run.start, run.end, run.url);
     } else {
-      const style = SpreadsheetApp.newTextStyle()
-        .setBold(run.type === 'bold' || undefined)
-        .setItalic(run.type === 'italic' || undefined)
-        .setFontFamily(run.type === 'code' ? 'Courier New' : undefined)
-        .setForegroundColor(run.type === 'code' ? '#503' : undefined)
-        .build();
-      rtv.setTextStyle(run.start, run.end, style);
+      const builder = SpreadsheetApp.newTextStyle();
+      if (run.type === 'bold') builder.setBold(true);
+      if (run.type === 'italic') builder.setItalic(true);
+      if (run.type === 'code') {
+        builder.setFontFamily('Courier New');
+        builder.setForegroundColor('#503');
+      }
+      rtv.setTextStyle(run.start, run.end, builder.build());
     }
   });
+
   return rtv.build();
 }
 
