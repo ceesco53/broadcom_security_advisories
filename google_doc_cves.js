@@ -1,10 +1,9 @@
 /**
- * Google Docs: Paste Broadcom Tanzu advisories via cURL CSV
+ * Google Docs: Paste Broadcom Tanzu advisories via cURL CSV (last 30 days)
  * - Adds "Broadcom CVEs → Paste CSV from cURL" to the Doc menu
- * - Dialog shows a prebuilt curl (last 30 days, segment=VT)
- * - You paste CSV output, and the script overwrites the Doc with a table
- *
- * Table columns: Notification Id | Release Date | Products | Level | Severity
+ * - Dialog shows a prebuilt curl (segment=VT, last 30 days via jq filter)
+ * - You paste CSV output; script overwrites the current Doc with a table:
+ *   Notification Id | Release Date | Products | Level | Severity
  */
 
 function onOpen() {
@@ -15,28 +14,31 @@ function onOpen() {
 }
 
 function showPasteDialog() {
-  var curl = buildCurlCommand_(); // prefilled with dates
-  var html = HtmlService.createHtmlOutputFromFile('paste_dialog')
-    .setWidth(700)
-    .setHeight(540);
-  // Pass the curl string to the template
-  html = HtmlService.createTemplateFromFile('paste_dialog');
-  html.curl = curl;
-  DocumentApp.getUi().showModalDialog(html.evaluate().setWidth(700).setHeight(540), 'Broadcom CVEs (segment=VT)');
+  var curl = buildCurlCommand_(); // prebuilt with last-30-days cutoff
+  var tmpl = HtmlService.createTemplateFromFile('paste_dialog');
+  tmpl.curl = curl;
+  var html = tmpl.evaluate().setWidth(700).setHeight(540);
+  DocumentApp.getUi().showModalDialog(html, 'Broadcom CVEs (segment=VT)');
 }
 
-/** Build a ready-to-run curl + jq that outputs CSV for the last 30 days (segment=VT). */
+/**
+ * Build a ready-to-run curl + jq command that outputs CSV of the last 30 days.
+ * We compute the cutoff as a fixed ISO timestamp so the command is portable across shells.
+ */
 function buildCurlCommand_() {
-  const tz = 'UTC';
-  const now = new Date();
-  const from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  const cutoffISO = Utilities.formatDate(from, tz, "yyyy-MM-dd'T'00:00:00'Z'");
-  const endpoint =
-    "https://support.broadcom.com/web/ecx/security-advisory/-/securityadvisory/getSecurityAdvisoryList";
+  var tz = 'UTC';
+  var now = new Date();
+  var from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  var cutoffISO = Utilities.formatDate(from, tz, "yyyy-MM-dd'T'00:00:00'Z'");
+  var endpoint = "https://support.broadcom.com/web/ecx/security-advisory/-/securityadvisory/getSecurityAdvisoryList";
 
-  const cmd = 
+  // CSV columns: Notification Id, Release Date, Products, Level, Severity
+  // Products joined with '; ' to avoid commas inside CSV fields.
+  var cmd =
 `# === Broadcom Tanzu advisories (segment=VT) – last 30 days ===
-# Run this in your terminal (requires jq), then paste the CSV output below.
+# 1) Copy everything between the "curl" and the final single quote.
+# 2) Run it in your terminal (requires jq).
+# 3) Paste the CSV output into the box below and click "Insert".
 
 CUTOFF="${cutoffISO}"
 
@@ -67,25 +69,23 @@ curl -s '${endpoint}' \\
   return cmd;
 }
 
-/** Server-side: parse pasted CSV and overwrite the Doc with a table. */
+/**
+ * Server-side entry from the dialog: parse pasted CSV and overwrite the current Doc.
+ * Expects header row to match the five requested columns (adds it if missing).
+ */
 function insertCsvIntoDoc(csvText) {
   if (!csvText || !csvText.trim()) {
     throw new Error('No CSV content received.');
   }
 
-  // Parse CSV into 2D array (rows x cols)
   var rows = Utilities.parseCsv(csvText);
   if (!rows || !rows.length) throw new Error('CSV parsing produced no rows.');
 
-  // Ensure our header is correct; if not present, prepend it
   var expectedHeader = ['Notification Id','Release Date','Products','Level','Severity'];
-  var header = rows[0].map(function(s){ return String(s || '').trim(); });
+  var header = rows[0].map(function (s) { return String(s || '').trim(); });
   var headerMatches = expectedHeader.join('|').toLowerCase() === header.join('|').toLowerCase();
-  if (!headerMatches) {
-    rows.unshift(expectedHeader);
-  }
+  if (!headerMatches) rows.unshift(expectedHeader);
 
-  // Overwrite current doc
   var doc = DocumentApp.getActiveDocument();
   var body = doc.getBody();
   clearBody_(body);
@@ -93,7 +93,7 @@ function insertCsvIntoDoc(csvText) {
   var title = 'Broadcom Tanzu Security Advisories – last 30 days (' +
               Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd') + ')';
   body.appendParagraph(title).setHeading(DocumentApp.ParagraphHeading.HEADING1);
-  body.appendParagraph('Source: support.broadcom.com (via cURL) | Segment=VT')
+  body.appendParagraph('Source: support.broadcom.com (via cURL) | Segment=VT | Last 30 days')
       .setItalic(true);
 
   var table = body.appendTable(rows);
@@ -104,18 +104,26 @@ function insertCsvIntoDoc(csvText) {
     headerRow.getCell(i).editAsText().setBold(true);
     headerRow.getCell(i).setBackgroundColor('#eeeeee');
   }
-  table.setColumnWidth(0, 160);
-  table.setColumnWidth(1, 160);
+  table.setColumnWidth(0, 160); // Notification Id
+  table.setColumnWidth(1, 160); // Release Date
 
   body.appendParagraph('Total advisories: ' + (rows.length - 1)).setBold(true);
 
   return 'Inserted ' + (rows.length - 1) + ' advisories into the document.';
 }
 
-/** Helpers */
+/* ---------------- helpers ---------------- */
 function clearBody_(body) {
-  try { body.clear(); }
-  catch (e) {
-    for (var i = body.getNumChildren() - 1; i >= 0; i--) body.removeChild(body.getChild(i));
+  try {
+    body.clear();
+  } catch (e) {
+    for (var i = body.getNumChildren() - 1; i >= 0; i--) {
+      body.removeChild(body.getChild(i));
+    }
   }
+}
+
+// For HtmlService includes
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
 }
