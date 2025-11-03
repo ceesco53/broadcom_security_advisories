@@ -27,21 +27,19 @@ function showPasteDialog() {
 
 /** Build a ready-to-run curl + jq that outputs CSV for the last 30 days (segment=VT). */
 function buildCurlCommand_() {
-  var tz = 'UTC';
-  var now = new Date();
-  var from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  // We’ll embed a fixed cutoff ISO timestamp so the command works on any shell (no GNU/BSD date quirks)
-  var cutoffISO = Utilities.formatDate(from, tz, "yyyy-MM-dd'T'00:00:00'Z'");
-  var endpoint = "https://support.broadcom.com/web/ecx/security-advisory/-/securityadvisory/getSecurityAdvisoryList";
+  const tz = 'UTC';
+  const now = new Date();
+  const from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const cutoffISO = Utilities.formatDate(from, tz, "yyyy-MM-dd'T'00:00:00'Z'");
+  const endpoint =
+    "https://support.broadcom.com/web/ecx/security-advisory/-/securityadvisory/getSecurityAdvisoryList";
 
-  // CSV headers: Notification Id, Release Date, Products, Level, Severity
-  // Products joined with "; " to avoid commas inside CSV fields
-  var cmd =
-`# 1) Copy everything between the "curl" and the final single quote.
-# 2) Run it in your terminal (requires jq).
-# 3) Paste the CSV output into the box below and click "Insert".
+  const cmd = 
+`# === Broadcom Tanzu advisories (segment=VT) – last 30 days ===
+# Run this in your terminal (requires jq), then paste the CSV output below.
 
 CUTOFF="${cutoffISO}"
+
 curl -s '${endpoint}' \\
   -H 'accept: application/json' \\
   -H 'content-type: application/json' \\
@@ -65,6 +63,7 @@ curl -s '${endpoint}' \\
       ]
   )
   | @csv'`;
+
   return cmd;
 }
 
