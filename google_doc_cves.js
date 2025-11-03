@@ -1,239 +1,117 @@
 /**
- * Creates a Google Doc and populates it with the last 30 days of CVEs
- * in a table with columns:
- * Notification Id | Release Date | Products | Level | Severity
+ * Build a Google Doc with last 30 days of Broadcom security advisories
+ * Columns: Notification Id | Release Date | Products | Level | Severity
+ *
+ * Data source: Broadcom advisories JSON documented here:
+ * https://www.broadcom.com/support/vmware-security-advisories  (landing)
+ * https://knowledge.broadcom.com/external/article/408302/json-api-for-product-security-advisories.html (API doc)
  *
  * Notes:
- * - "Notification Id" = CVE ID (e.g., CVE-2025-12345)
- * - "Release Date" = NVD "published" field (UTC)
- * - "Level" = CVSS Base Score (v3.1 -> v3.0 -> v2 fallback)
- * - "Severity" = Base Severity text (CRITICAL/HIGH/MEDIUM/LOW — same fallback)
- * - "Products" = deduped list of affected product names parsed from CPEs
- *
- * Optional: Add an NVD API key in Project Settings > Script properties:
- *   Name: NVD_API_KEY   Value: <your key>
+ * - We query several "segments" (divisions) and de-duplicate by advisoryId.
+ * - "Level" is the advisory's overall severity (e.g., Moderate/High).
+ * - "Severity" is the max CVSS severity text if available, else blank.
  */
-
-function buildCveDocLast30Days() {
+function buildBroadcomAdvisoriesDoc() {
   const now = new Date();
-  const start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-  const pubStartDate = toIsoNoMillis(start); // e.g., 2025-10-04T00:00:00.000Z
-  const pubEndDate   = toIsoNoMillis(now);
+  const FROM = Utilities.formatDate(from, 'UTC', 'yyyy-MM-dd');
+  const TO   = Utilities.formatDate(now,  'UTC', 'yyyy-MM-dd');
 
-  const title = `CVEs – last 30 days (${Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyy-MM-dd')})`;
+  // Tweak this list as needed; see Broadcom API docs for segment codes.
+  const SEGMENTS = ['VC', 'TNZ', 'ANS']; // VMware Cloud, Tanzu, App Net & Sec (examples)
+
+  // Public JSON endpoint documented by Broadcom
+  const BASE = 'https://www.broadcom.com/support/security/advisories/json';
+
+  const all = [];
+  SEGMENTS.forEach(seg => {
+    const url = `${BASE}?segment=${encodeURIComponent(seg)}&fromDate=${FROM}&toDate=${TO}&pageSize=500`;
+    const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (resp.getResponseCode() !== 200) {
+      // Non-fatal: continue other segments; log for debugging.
+      console.warn(`Segment ${seg} fetch failed: ${resp.getResponseCode()} ${resp.getContentText()}`);
+      return;
+    }
+    const data = JSON.parse(resp.getContentText() || '{}');
+    // Expecting an array; if the shape changes, adjust mapping below.
+    if (Array.isArray(data)) all.push(...data);
+    else if (Array.isArray(data.items)) all.push(...data.items);
+  });
+
+  // De-duplicate by advisoryId
+  const byId = new Map();
+  all.forEach(item => {
+    const id = safe(item, ['advisoryId']) || safe(item, ['id']) || '';
+    if (!id) return;
+    if (!byId.has(id)) byId.set(id, item);
+  });
+
+  // Build rows
+  const header = ['Notification Id', 'Release Date', 'Products', 'Level', 'Severity'];
+  const rows = [header];
+
+  byId.forEach(advisory => {
+    // Try multiple field names to be resilient to minor API changes.
+    const id        = safe(advisory, ['advisoryId']) || safe(advisory, ['id']) || '';
+    const issueDate = safe(advisory, ['issueDate']) || safe(advisory, ['date']) || '';
+    const productsA = safe(advisory, ['impactedProducts']) || safe(advisory, ['products']) || [];
+    const products  = Array.isArray(productsA) ? productsA.join(', ') : String(productsA || '');
+
+    // Advisory-level severity (e.g., "High", "Moderate")
+    const level =
+      safe(advisory, ['advisorySeverity']) ||
+      safe(advisory, ['severity']) || '';
+
+    // CVSS max severity text (if available)
+    const cvssRange = safe(advisory, ['cvssV3Range']) || '';      // e.g., "4.4–8.6"
+    const cvssMax   = safe(advisory, ['cvssMaxSeverity']) || '';  // e.g., "CRITICAL/HIGH"
+    const severity  = cvssMax || cvssTextFromRange(cvssRange);
+
+    rows.push([id, issueDate, products, level, severity]);
+  });
+
+  // Create Doc
+  const title = `Broadcom Security Advisories – last 30 days (${Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyy-MM-dd')})`;
   const doc = DocumentApp.create(title);
   const body = doc.getBody();
 
   body.appendParagraph(title).setHeading(DocumentApp.ParagraphHeading.HEADING1);
-  body.appendParagraph(
-    `Window: ${pubStartDate} to ${pubEndDate} (UTC)`
-  ).setItalic(true);
+  body.appendParagraph(`Source: Broadcom Support Security Advisories; Window: ${FROM} to ${TO} (UTC)`)
+      .setItalic(true);
 
-  // Fetch CVEs (handles pagination)
-  const cves = fetchAllCves(pubStartDate, pubEndDate);
-
-  // Build table rows
-  const header = ['Notification Id', 'Release Date', 'Products', 'Level', 'Severity'];
-  const rows = [header];
-
-  cves.forEach(vuln => {
-    const cve = vuln.cve || vuln; // tolerate slight variations
-    const id = cve.id || '';
-    const published = cve.published || '';
-    const { score, severity } = getCvss(cve);
-    const products = extractProducts(cve);
-
-    rows.push([
-      id,
-      published,
-      products,
-      score != null ? String(score) : '',
-      severity || ''
-    ]);
-  });
-
-  // Create the table
   const table = body.appendTable(rows);
-
-  // Style header row
+  // Style header
   const headerRow = table.getRow(0);
   for (let i = 0; i < headerRow.getNumCells(); i++) {
     headerRow.getCell(i).editAsText().setBold(true);
     headerRow.getCell(i).setBackgroundColor('#eeeeee');
   }
+  // Light column sizing (Docs has limited control)
+  table.setColumnWidth(0, 140);
+  table.setColumnWidth(1, 140);
 
-  // Fit columns a bit (Docs is limited; this mainly ensures text wrap)
-  table.setColumnWidth(0, 130); // Notification Id
-  table.setColumnWidth(1, 160); // Release Date
-
-  body.appendParagraph(`Total CVEs: ${cves.length}`).setBold(true);
-
+  body.appendParagraph(`Total advisories: ${rows.length - 1}`).setBold(true);
   Logger.log(`Created Doc: ${doc.getUrl()}`);
 }
 
-/** --- Helpers --- **/
+/** Helpers **/
 
-function toIsoNoMillis(d) {
-  // NVD accepts full ISO; keeping millis is fine, but we’ll retain them for clarity.
-  // If you prefer no millis: return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
-  return d.toISOString();
-}
-
-function fetchAllCves(pubStartDate, pubEndDate) {
-  const baseUrl = 'https://services.nvd.nist.gov/rest/json/cves/2.0';
-  const pageSize = 2000; // NVD max per page is typically 2000
-  let startIndex = 0;
-  let total = null;
-  const all = [];
-
-  const apiKey = PropertiesService.getScriptProperties().getProperty('NVD_API_KEY');
-
-  // Keep paging until we collect totalResults (or hit a safety cap)
-  for (let page = 0; page < 20; page++) { // safety: max ~40k entries
-    const params = {
-      pubStartDate: pubStartDate,
-      pubEndDate: pubEndDate,
-      startIndex: startIndex,
-      resultsPerPage: pageSize,
-      // You can add keywordSearch=, cvssV3Severity=, etc. if you want filters
-    };
-
-    const url = buildUrl(baseUrl, params);
-    const options = {
-      method: 'get',
-      muteHttpExceptions: true,
-      headers: apiKey ? { 'apiKey': apiKey } : {}
-    };
-
-    const resp = UrlFetchApp.fetch(url, options);
-    if (resp.getResponseCode() !== 200) {
-      throw new Error(`NVD API error ${resp.getResponseCode()}: ${resp.getContentText()}`);
-    }
-
-    const data = JSON.parse(resp.getContentText());
-    const batch = (data.vulnerabilities || []).map(v => v); // already in v2.0 shape
-    all.push(...batch);
-
-    if (total == null) total = data.totalResults || batch.length;
-
-    startIndex += batch.length;
-    if (startIndex >= total || batch.length === 0) break;
-
-    // Be polite with rate limits (esp. without API key)
-    Utilities.sleep(apiKey ? 200 : 1200);
-  }
-
-  return all;
-}
-
-function buildUrl(base, params) {
-  const esc = encodeURIComponent;
-  const q = Object.keys(params)
-    .filter(k => params[k] !== undefined && params[k] !== null)
-    .map(k => `${esc(k)}=${esc(params[k])}`)
-    .join('&');
-  return `${base}?${q}`;
-}
-
-function getCvss(cve) {
-  // Try CVSS v3.1, then v3.0, then v2
+function safe(obj, pathArr) {
   try {
-    const m31 = cve.metrics && cve.metrics.cvssMetricV31 && cve.metrics.cvssMetricV31[0];
-    if (m31 && m31.cvssData) {
-      return {
-        score: m31.cvssData.baseScore,
-        severity: m31.cvssData.baseSeverity
-      };
-    }
-  } catch (e) {}
-
-  try {
-    const m30 = cve.metrics && cve.metrics.cvssMetricV30 && cve.metrics.cvssMetricV30[0];
-    if (m30 && m30.cvssData) {
-      return {
-        score: m30.cvssData.baseScore,
-        severity: m30.cvssData.baseSeverity
-      };
-    }
-  } catch (e) {}
-
-  try {
-    const m20 = cve.metrics && cve.metrics.cvssMetricV2 && cve.metrics.cvssMetricV2[0];
-    if (m20 && m20.cvssData) {
-      // v2 stores severity at top level sometimes (baseSeverity may be undefined)
-      return {
-        score: m20.cvssData.baseScore,
-        severity: m20.baseSeverity || (m20.cvssData.baseScore != null ? v2SeverityFromScore(m20.cvssData.baseScore) : '')
-      };
-    }
-  } catch (e) {}
-
-  return { score: null, severity: '' };
+    return pathArr.reduce((o, k) => (o && k in o ? o[k] : undefined), obj);
+  } catch (e) { return undefined; }
 }
 
-function v2SeverityFromScore(score) {
-  // Rough mapping for v2 when baseSeverity not present
-  if (score >= 7.0) return 'HIGH';
-  if (score >= 4.0) return 'MEDIUM';
-  if (score >= 0.0) return 'LOW';
+function cvssTextFromRange(rangeStr) {
+  if (!rangeStr) return '';
+  // If we get something like "4.4 - 8.6", map the max to a severity label.
+  const m = String(rangeStr).match(/([\d.]+)\s*[-–]\s*([\d.]+)/);
+  const max = m ? parseFloat(m[2]) : parseFloat(rangeStr);
+  if (isNaN(max)) return '';
+  if (max >= 9.0) return 'CRITICAL';
+  if (max >= 7.0) return 'HIGH';
+  if (max >= 4.0) return 'MEDIUM';
+  if (max >= 0.1) return 'LOW';
   return '';
-}
-
-function extractProducts(cve) {
-  // Pull product names from CPE criteria strings in configurations.nodes[].cpeMatch[].criteria
-  // Dedup and join with commas. Fall back to blank if none.
-  const products = new Set();
-
-  const configs = (cve.configurations || []);
-  configs.forEach(cfg => {
-    const nodes = (cfg.nodes || []);
-    nodes.forEach(node => {
-      const matches = (node.cpeMatch || node.cpeMatches || []);
-      matches.forEach(m => {
-        if (m.vulnerable && m.criteria) {
-          const product = parseProductFromCpe(m.criteria);
-          if (product) products.add(product);
-        }
-      });
-      // Some schemas use "children" for nested nodes
-      const children = (node.children || []);
-      children.forEach(child => {
-        const cm = (child.cpeMatch || child.cpeMatches || []);
-        cm.forEach(m => {
-          if (m.vulnerable && m.criteria) {
-            const product = parseProductFromCpe(m.criteria);
-            if (product) products.add(product);
-          }
-        });
-      });
-    });
-  });
-
-  // If nothing found in configurations, try weaknesses/reference products (rarely present)
-  // Keep it simple: we only use configurations for product list
-  const list = Array.from(products);
-  // Keep it readable—limit to 6, with a +N suffix if more
-  if (list.length > 6) {
-    const shown = list.slice(0, 6).join(', ');
-    return `${shown} +${list.length - 6} more`;
-  }
-  return list.join(', ');
-}
-
-function parseProductFromCpe(cpeStr) {
-  // CPE 2.3 format: cpe:2.3:a:vendor:product:version:update:...
-  // We’ll return "vendor product" (product with hyphens/underscores normalized)
-  try {
-    const parts = cpeStr.split(':');
-    // parts[2] is part (a/h/o), [3]=vendor, [4]=product
-    const vendor = parts[3] || '';
-    const product = parts[4] || '';
-    if (!product) return '';
-    const niceVendor = vendor.replace(/[_-]+/g, ' ');
-    const niceProduct = product.replace(/[_-]+/g, ' ');
-    return `${niceVendor} ${niceProduct}`.trim();
-  } catch (e) {
-    return '';
-  }
 }
