@@ -11,20 +11,21 @@
       .btn.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
       .flex { display: flex; gap: 8px; align-items: center; }
       h2 { margin: 0 0 6px; }
+      code { background: #f6f6f6; padding: 1px 4px; border-radius: 4px; }
     </style>
   </head>
   <body>
     <div class="row">
       <h2>Broadcom CVEs (segment=VT)</h2>
       <div class="small">
-        1) Copy the cURL below, run it in your terminal (requires <code>jq</code>).<br>
-        2) Paste the CSV output into the box. 3) Click <strong>Insert</strong>.
+        This cURL uses the documented <code>GET</code> endpoint with <code>fromDate</code>/<code>toDate</code> (ISO-8601, last 30 days)
+        and formats to CSV with <code>jq</code>. Then paste the CSV below and click <strong>Insert</strong>.
       </div>
     </div>
 
     <div class="row">
-      <label><strong>cURL command</strong></label>
-      <textarea id="curl" rows="10" readonly><?= curl ?></textarea>
+      <label><strong>cURL command (last 30 days via fromDate/toDate)</strong></label>
+      <textarea id="curl" rows="12" readonly><?= curl ?></textarea>
       <div class="row flex">
         <button class="btn" onclick="copyCurl()">Copy cURL</button>
       </div>
