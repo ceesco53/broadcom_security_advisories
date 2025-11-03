@@ -1,0 +1,111 @@
+<!doctype html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: Arial, sans-serif; padding: 14px; }
+      label { font-weight: 600; }
+      input[type="date"], select, input[type="number"] { width: 100%; box-sizing: border-box; }
+      .row { margin-bottom: 12px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      .btn { padding: 8px 12px; border: 1px solid #999; border-radius: 6px; cursor: pointer; }
+      .btn.primary { background: #1a73e8; color: white; border-color: #1a73e8; }
+      .small { font-size: 12px; color: #666; }
+      .status { margin-left: 8px; }
+      pre { background: #f6f6f6; padding: 8px; border-radius: 6px; overflow: auto; max-height: 200px; }
+      h2 { margin: 0 0 8px; }
+    </style>
+  </head>
+  <body>
+    <h2>Fetch Broadcom Advisories</h2>
+    <div class="small">Select a date range and segment. The server will call the Broadcom API and (for Fetch & Insert) overwrite this Doc with a table.</div>
+
+    <div class="row grid">
+      <div>
+        <label for="fromDate">From date</label>
+        <input id="fromDate" type="date" value="<?= defaults.fromDate ?>">
+      </div>
+      <div>
+        <label for="toDate">To date</label>
+        <input id="toDate" type="date" value="<?= defaults.toDate ?>">
+      </div>
+    </div>
+
+    <div class="row grid">
+      <div>
+        <label for="segment">Segment</label>
+        <select id="segment">
+          <option value="VT" <?= defaults.segment === 'VT' ? 'selected' : '' ?>>VT (Tanzu)</option>
+          <option value="VC">VC (VMware Cloud / VMSA)</option>
+          <option value="ANS">ANS (App Net & Security)</option>
+          <option value="TNZ">TNZ</option>
+        </select>
+      </div>
+      <div>
+        <label for="pageSize">Page size</label>
+        <input id="pageSize" type="number" min="1" max="100000" value="<?= defaults.pageSize ?>">
+      </div>
+    </div>
+
+    <div class="row">
+      <button class="btn" onclick="test()">Test fetch</button>
+      <button class="btn primary" onclick="runFetch()">Fetch & Insert</button>
+      <span id="status" class="small status"></span>
+    </div>
+
+    <div id="diag" class="row" style="display:none;">
+      <div class="small"><strong>Diagnostics</strong></div>
+      <pre id="diagpre"></pre>
+    </div>
+
+    <script>
+      function getParams() {
+        return {
+          fromDate: document.getElementById('fromDate').value,
+          toDate:   document.getElementById('toDate').value,
+          segment:  document.getElementById('segment').value,
+          pageSize: document.getElementById('pageSize').value
+        };
+      }
+
+      function test() {
+        const status = document.getElementById('status');
+        const diag = document.getElementById('diag');
+        const diagpre = document.getElementById('diagpre');
+        status.textContent = 'Testing…';
+        diag.style.display = 'none';
+        google.script.run
+          .withSuccessHandler(res => {
+            status.textContent = `HTTP ${res.httpStatus}; items=${res.listLength}`;
+            const out = {
+              payloadUsed: res.payloadUsed,
+              httpStatus: res.httpStatus,
+              rawLength: res.rawLength,
+              listLength: res.listLength,
+              sampleIds: res.sampleIds,
+              rawSnippet: res.rawSnippet
+            };
+            diagpre.textContent = JSON.stringify(out, null, 2);
+            diag.style.display = 'block';
+          })
+          .withFailureHandler(err => {
+            status.textContent = 'Error: ' + (err && err.message ? err.message : err);
+          })
+          .testFetch(getParams());
+      }
+
+      function runFetch() {
+        const status = document.getElementById('status');
+        status.textContent = 'Fetching & inserting…';
+        google.script.run
+          .withSuccessHandler(res => {
+            status.textContent = `Done: ${res.count} advisories inserted (${res.segment}: ${res.fromDate} → ${res.toDate}).`;
+          })
+          .withFailureHandler(err => {
+            status.textContent = 'Error: ' + (err && err.message ? err.message : err);
+          })
+          .runFetchAndInsert(getParams());
+      }
+    </script>
+  </body>
+</html>
