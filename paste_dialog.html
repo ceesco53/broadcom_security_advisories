@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: Arial, sans-serif; padding: 12px; }
+      textarea { width: 100%; box-sizing: border-box; }
+      .small { font-size: 12px; color: #555; }
+      .row { margin-bottom: 10px; }
+      .btn { padding: 8px 12px; border: 1px solid #999; border-radius: 6px; cursor: pointer; }
+      .btn.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+      .flex { display: flex; gap: 8px; align-items: center; }
+    </style>
+  </head>
+  <body>
+    <div class="row">
+      <h2 style="margin:0 0 6px;">Broadcom CVEs (segment=VT)</h2>
+      <div class="small">1) Copy the cURL below, run it in your terminal (requires <code>jq</code>), 2) paste the CSV output below, 3) click Insert.</div>
+    </div>
+
+    <div class="row">
+      <label><strong>cURL command</strong></label>
+      <textarea id="curl" rows="10" readonly><?= curl ?></textarea>
+      <div class="row flex">
+        <button class="btn" onclick="copyCurl()">Copy cURL</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <label><strong>Paste CSV output here</strong></label>
+      <textarea id="csv" rows="12" placeholder="Paste the CSV output from the cURL command here..."></textarea>
+    </div>
+
+    <div class="row flex">
+      <button class="btn primary" onclick="submitCsv()">Insert</button>
+      <button class="btn" onclick="google.script.host.close()">Cancel</button>
+      <span id="status" class="small"></span>
+    </div>
+
+    <script>
+      function copyCurl() {
+        const ta = document.getElementById('curl');
+        ta.select(); ta.setSelectionRange(0, 99999);
+        document.execCommand('copy');
+      }
+      function submitCsv() {
+        const csv = document.getElementById('csv').value || '';
+        const status = document.getElementById('status');
+        status.textContent = 'Uploading CSV...';
+        google.script.run
+          .withSuccessHandler(msg => { status.textContent = msg; setTimeout(() => google.script.host.close(), 900); })
+          .withFailureHandler(err => { status.textContent = 'Error: ' + (err && err.message ? err.message : err); })
+          .insertCsvIntoDoc(csv);
+      }
+    </script>
+  </body>
+</html>
