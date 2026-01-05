@@ -294,7 +294,13 @@ function advisoriesToRows_(advisories, range) {
     if (seen.has(key)) return;
     seen.add(key);
 
-    rows.push({ advisoryId, severity, link, pub });
+    rows.push({
+      advisoryId,              // notificationId
+      advisoryUrl: link,       // notificationUrl
+      severity,
+      pub,
+      comments: normalizeAndTruncateTitle_(a.title, 60)
+    });
   });
 
   rows.sort((x, y) => y.pub - x.pub || x.advisoryId.localeCompare(y.advisoryId));
@@ -330,12 +336,17 @@ function writeRows_(sheet, rows) {
 
   const out = rows.map(r => {
     const line = new Array(headers.length).fill("");
-    line[col["CVE ID"] - 1] = r.advisoryId;   // notificationId
+    // CVE ID as hyperlink
+    line[col["CVE ID"] - 1] =
+      `=HYPERLINK("${r.advisoryUrl}", "${r.advisoryId}")`;
+
     line[col["RATING"] - 1] = r.severity;
-    // COMMENTS intentionally blank
-    line[col["Link"] - 1] = r.link;
+
+    // COMMENTS = truncated title
+    line[col["COMMENTS"] - 1] = r.comments;
+
+    line[col["Link"] - 1] = r.advisoryUrl;
     line[col["Pub Date"] - 1] = r.pub;
-    // RR Date intentionally blank
     return line;
   });
 
@@ -422,4 +433,19 @@ function tasCVE_debugFetchFirstPage() {
   console.log("First item:", JSON.stringify(first, null, 2));
 
   return json?.data?.list?.length || 0;
+}
+
+function normalizeAndTruncateTitle_(title, maxLen) {
+  if (!title) return "";
+
+  let s = String(title).trim();
+
+  // Remove leading boilerplate if present
+  const PREFIX = "Product Release Advisory - ";
+  if (s.startsWith(PREFIX)) {
+    s = s.substring(PREFIX.length).trim();
+  }
+
+  if (s.length <= maxLen) return s;
+  return s.substring(0, maxLen) + "...";
 }
